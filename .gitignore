@@ -6,3 +6,5 @@ checkpoints/
 *.pt
 *.zip
 .DS_Store
+results/
+

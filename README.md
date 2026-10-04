@@ -93,5 +93,3 @@ separate scripts once baseline training is working:
 - `src/calibrate.py` — temperature scaling, ECE/Brier per frequency tier
 - `src/selective_predict.py` — risk-coverage curves, reject head
 - `src/explain.py` — Integrated Gradients (via `captum`)
-
-Say the word once baseline training runs cleanly and I'll build those next.

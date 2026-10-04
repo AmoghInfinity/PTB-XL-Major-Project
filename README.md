@@ -92,4 +92,8 @@ and explainability components from the project blueprint come next, as
 separate scripts once baseline training is working:
 - `src/calibrate.py` — temperature scaling, ECE/Brier per frequency tier
 - `src/selective_predict.py` — risk-coverage curves, reject head
+<<<<<<< HEAD
 - `src/explain.py` — Integrated Gradients (via `captum`)
+=======
+- `src/explain.py` — Integrated Gradients (via `captum`)
+>>>>>>> 152c76b879e427d2d0bdebb3d5aae21cb35cd73b

@@ -1,0 +1,21 @@
+data:
+  sampling_rate: 100
+  min_label_count: 10 # drop SCP codes with fewer than this many examples
+
+model:
+  base_width: 32
+  in_channels: 12
+
+train:
+  epochs: 30
+  batch_size: 128 # safe starting point for 8GB VRAM; raise if nvidia-smi shows headroom
+  lr: 0.001
+  weight_decay: 0.0001
+  num_workers: 4
+  amp: true # bf16 mixed precision — recommended on Blackwell
+
+calibration:
+  methods: [temperature_scaling, label_smoothing, focal_loss]
+
+selective_prediction:
+  coverage_levels: [1.0, 0.9, 0.8, 0.7, 0.6]

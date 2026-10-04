@@ -1,0 +1,11 @@
+# PyTorch is installed separately — see README (needs cu128+ for RTX 5050 / Blackwell)
+wfdb>=4.1.2
+numpy>=1.26
+pandas>=2.1
+scikit-learn>=1.4
+scipy>=1.11
+matplotlib>=3.8
+seaborn>=0.13
+tqdm>=4.66
+pyyaml>=6.0
+captum>=0.7.0

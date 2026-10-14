@@ -1,0 +1,151 @@
+# ResNet1D Baseline and Calibration Study on PTB-XL
+
+## 1. Study objective
+
+The objective of this phase is to establish a reproducible ResNet1D baseline for multi-label ECG classification on PTB-XL, evaluate alternative loss functions, and investigate whether post-hoc temperature scaling improves the reliability of predicted probabilities.
+
+The study evaluates discrimination, threshold-dependent classification, calibration, and patient-level uncertainty. The ResNet1D experiments form the baseline for subsequent comparisons with alternative temporal architectures.
+
+## 2. Dataset and preprocessing
+
+- **Dataset:** PTB-XL
+- **Recordings:** 21,799 in the local metadata
+- **Sampling frequency:** 100 Hz
+- **Input dimensions:** 12 ECG leads × 1,000 samples
+- **Prediction task:** Multi-label classification across 44 labels
+- **Training split:** 17,418 recordings
+- **Validation split:** 2,183 recordings
+- **Test split:** 2,198 recordings
+- **Test patients:** 1,904 unique patients
+
+The official patient-stratified folds are used: folds 1–8 for training, fold 9 for validation, and fold 10 for testing.
+
+Preprocessing consists of third-order Butterworth filtering from 0.5 to 40 Hz, zero-phase filtering using `filtfilt`, and per-lead mean and standard-deviation normalization.
+
+The prediction arrays have been verified against the test dataset targets in dataset order. All target entries match exactly.
+
+## 3. Experimental configurations
+
+Three loss configurations were evaluated:
+
+1. **Standard binary cross-entropy (BCE):** Primary baseline.
+2. **Weighted BCE:** Class-weighted loss intended to address label imbalance.
+3. **Focal loss:** Gamma = 2, without class weights.
+
+The baseline checkpoint is `checkpoints/best_model.pt`. The weighted-BCE and focal-loss checkpoints are `checkpoints/best_model_weighted_bce.pt` and `checkpoints/best_model_focal.pt`, respectively.
+
+The primary model selection metric was validation macro-AUROC. Threshold-0.5 results and validation-selected threshold results are reported separately.
+
+## 4. Test-set results
+
+| Configuration | Best validation macro-AUROC | Test macro-AUROC | Test macro-AUPRC | Test macro-F1 at 0.5 |
+|---|---:|---:|---:|---:|
+| Standard BCE | 0.9260 | 0.9235 | 0.3041 | 0.2150 |
+| Weighted BCE | 0.9270 | 0.9089 | 0.2932 | 0.2285 |
+| Focal loss | 0.9223 | 0.9254 | Not recorded in the current consolidated results | 0.2097 |
+
+The standard BCE model achieved a test macro-AUROC of 0.9235 and was retained as the primary baseline. Weighted BCE achieved a slightly higher validation macro-AUROC but lower test macro-AUROC. Focal loss achieved the highest recorded test macro-AUROC among these configurations, at 0.9254, but its threshold-0.5 macro-F1 was lower than the baseline.
+
+These results illustrate that model ranking performance and threshold-dependent classification performance do not necessarily improve together. The existing experiments do not establish that one loss function is uniformly superior across all metrics.
+
+### 4.1 Baseline performance by label-frequency tier
+
+| Metric | Common | Medium | Rare |
+|---|---:|---:|---:|
+| AUROC | 0.9244 | 0.9086 | 0.9377 |
+| AUPRC | 0.5795 | 0.2496 | 0.1017 |
+| F1 at threshold 0.5 | 0.4984 | 0.1507 | 0.0148 |
+
+Rare-label AUROC is comparatively high, but rare-label AUPRC and F1 remain low. This demonstrates why ranking metrics alone are insufficient to characterize multi-label classification performance, particularly for infrequent labels.
+
+### 4.2 Threshold selection
+
+For the baseline, validation-selected per-label thresholds produced:
+
+- Macro-F1: 0.2853
+- Micro-F1: 0.4425
+- Common-tier F1: 0.5632
+- Medium-tier F1: 0.2408
+- Rare-tier F1: 0.0810
+
+For weighted BCE, validation-selected thresholds produced macro-F1 of 0.2856 and micro-F1 of 0.5424.
+
+Threshold-selected results must remain distinct from threshold-0.5 results. Thresholds should be selected using validation data only, and rare-label thresholds should be interpreted cautiously because they can be unstable when positive examples are scarce.
+
+## 5. Calibration analysis
+
+Global temperature scaling was fitted on validation predictions by minimizing binary cross-entropy. The fitted temperature was:
+
+**T = 1.101489**
+
+Validation BCE decreased from 0.063208 to 0.062705.
+
+### 5.1 Test-set calibration results
+
+| Metric | Raw probabilities | Temperature-scaled |
+|---|---:|---:|
+| Macro ECE | 0.010152 | 0.009712 |
+| Common ECE | 0.025734 | 0.023787 |
+| Medium ECE | 0.004930 | 0.004903 |
+| Rare ECE | 0.000831 | 0.001385 |
+| Macro Brier score | 0.017298 | 0.017225 |
+| Common Brier score | 0.042746 | 0.042453 |
+| Medium Brier score | 0.008843 | 0.008895 |
+| Rare Brier score | 0.002001 | 0.002008 |
+
+Temperature scaling preserves prediction ranking and leaves the observed AUROC, AUPRC, and threshold-0.5 F1 unchanged. It produces small reductions in aggregate ECE and Brier score, but the changes differ by frequency tier.
+
+Common-label calibration improves on both ECE and Brier score. Rare-label ECE increases, and medium-label Brier score worsens slightly. Therefore, the results support a heterogeneous calibration effect rather than a universal improvement.
+
+## 6. Patient-level uncertainty analysis
+
+A paired patient-cluster bootstrap was performed using 1,000 replicates and random seed 42. The same patient resamples were used for raw and temperature-scaled predictions. The analysis includes 2,198 test recordings from 1,904 unique patients.
+
+The saved macro-AUROC estimate is 0.923546, with a 95% percentile bootstrap interval of [0.910421, 0.931658]. Macro-F1 at threshold 0.5 is 0.214997, with an interval of [0.195094, 0.232371].
+
+For calibration, the paired scaled-minus-raw differences and their existing percentile intervals are:
+
+- **Macro ECE:** −0.000440; 95% CI [−0.000766, 0.000206].
+- **Common ECE:** −0.001947; 95% CI [−0.002839, −0.000259].
+- **Rare ECE:** +0.000554; 95% CI [+0.000083, +0.000863].
+- **Macro Brier score:** −0.0000733; 95% CI [−0.0000983, −0.0000495].
+- **Medium Brier score:** +0.0000519; 95% CI [+0.0000245, +0.0000782].
+
+Negative differences favor temperature scaling for ECE and Brier score because lower values are better.
+
+### 6.1 Statistical limitation
+
+The observed full-test macro ECE lies below the lower endpoint of its bootstrap percentile interval. The same pattern appears for scaled macro ECE. A diagnostic reproduced this behavior, with no bootstrap replicate at or below the observed full-test estimate for either distribution.
+
+This behavior warrants caution when interpreting the percentile intervals for ECE. It does not by itself prove an implementation error. The existing paired macro-ECE difference interval crosses zero, so the current analysis does not establish a clear aggregate macro-ECE improvement.
+
+The intervals characterize test-sample uncertainty under patient-cluster resampling. They do not quantify variability across independent model-training seeds. The results should not be interpreted as evidence of clinical readiness.
+
+## 7. Reproducibility artifacts
+
+The following artifacts have been verified as present:
+
+- `checkpoints/best_model.pt`
+- `checkpoints/best_model_weighted_bce.pt`
+- `checkpoints/best_model_focal.pt`
+- `results/baseline_test_predictions.npz`
+- `results/raw_calibration_test_predictions.npz`
+- `results/temperature_scaled_test_predictions.npz`
+- `results/temperature_scaling_results.json`
+- `results/statistical_analysis_results.json`
+
+The statistical results JSON parses successfully, and `src/statistical_analysis.py` compiles. Its interpretation note was corrected without recomputing or changing the numerical metrics.
+
+## 8. Current conclusions and remaining limitations
+
+The standard BCE ResNet1D provides a strong discrimination baseline on the selected PTB-XL test fold. Weighted BCE and focal loss offer useful ablations but show trade-offs between discrimination and threshold-dependent classification. Temperature scaling produces small, heterogeneous calibration changes.
+
+The current record does not yet establish robustness across training seeds, clinical utility, or superiority over contemporary ECG architectures. Statistical significance should not be claimed beyond what the existing patient-level intervals support.
+
+The proposed temporal-evidence reliability direction remains a research hypothesis, not a validated contribution. It will require a defined experimental protocol and a separate literature assessment before it can be claimed as novel.
+
+## 9. Handoff to the next phase
+
+The ResNet1D results are consolidated as the working baseline record. The next research phase is to implement ECG-Mamba as a separate model using the existing dataset splits, preprocessing, label vocabulary, and input/output contract.
+
+The ECG-Mamba experiment should be evaluated against the frozen ResNet1D baseline using the same test protocol. Any additional temporal analysis should be motivated by a specific hypothesis rather than added solely to increase the number of experiments.

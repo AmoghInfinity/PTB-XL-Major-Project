@@ -19,6 +19,7 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from data.dataset import PTBXLDataset
 from models.resnet1d import ResNet1D
+from models.ecg_mamba import ECGMamba
 
 CHECKPOINT_DIR = Path(__file__).resolve().parents[1] / "checkpoints"
 
@@ -218,7 +219,14 @@ def main():
         default="bce",
         help="Training objective.",
     )
-
+    
+    parser.add_argument(
+        "--model",
+        choices=["resnet1d", "ecg_mamba"],
+        default="resnet1d",
+        help="Model architecture to train.",
+    )
+    
     parser.add_argument(
         "--checkpoint-name",
         type=str,
@@ -258,9 +266,22 @@ def main():
         pin_memory=True,
     )
 
-    model = ResNet1D(
-        n_labels=len(train_ds.vocab)
-    ).to(device)
+    if args.model == "resnet1d":
+        model = ResNet1D(
+            n_labels=len(train_ds.vocab)
+        )
+    else:
+        model = ECGMamba(
+            n_labels=len(train_ds.vocab)
+        )
+
+    model = model.to(device)
+
+    print(f"Selected model: {args.model}")
+    print(
+        f"Trainable parameters: "
+        f"{sum(p.numel() for p in model.parameters() if p.requires_grad):,}"
+    )
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -400,6 +421,7 @@ def main():
             )
 
             checkpoint = {
+                "model_name": args.model,
                 "model_state": model.state_dict(),
                 "vocab": train_ds.vocab,
                 "tier_of": train_ds.tier_of,

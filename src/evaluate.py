@@ -24,6 +24,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from data.dataset import PTBXLDataset
 from models.resnet1d import ResNet1D
+from models.ecg_mamba import ECGMamba
+
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -144,7 +146,14 @@ def main():
         default=0.5,
         help="Probability threshold used to calculate F1.",
     )
-
+    
+    parser.add_argument(
+        "--model",
+        choices=["resnet1d", "ecg_mamba"],
+        default="resnet1d",
+        help="Model architecture stored in the checkpoint.",
+    )
+    
     parser.add_argument(
         "--checkpoint-name",
         type=str,
@@ -234,9 +243,24 @@ def main():
             "the test dataset vocabulary."
         )
 
-    model = ResNet1D(
-        n_labels=len(checkpoint["vocab"])
-    ).to(device)
+    checkpoint_model = checkpoint.get("model_name", "resnet1d")
+
+    if checkpoint_model != args.model:
+        raise ValueError(
+            f"Requested model '{args.model}' does not match "
+            f"checkpoint model '{checkpoint_model}'."
+        )
+
+    if args.model == "resnet1d":
+        model = ResNet1D(
+            n_labels=len(checkpoint["vocab"])
+        )
+    else:
+        model = ECGMamba(
+            n_labels=len(checkpoint["vocab"])
+        )
+
+    model = model.to(device)
 
     model.load_state_dict(checkpoint["model_state"])
 

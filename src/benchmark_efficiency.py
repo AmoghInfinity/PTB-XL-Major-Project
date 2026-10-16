@@ -29,15 +29,20 @@ def parse_args():
         description="Benchmark PTB-XL model inference efficiency."
     )
     parser.add_argument(
-        "--split", choices=("train", "val", "test"), default="test"
+        "--split",
+        choices=("train", "val", "test"),
+        default="test",
     )
     parser.add_argument(
-        "--batch-sizes", default="1,8,16,32,64,128"
+        "--batch-sizes",
+        default="1,8,16,32,64,128",
     )
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--repeats", type=int, default=50)
     parser.add_argument(
-        "--device", choices=("auto", "cuda", "cpu"), default="auto"
+        "--device",
+        choices=("auto", "cuda", "cpu"),
+        default="auto",
     )
     return parser.parse_args()
 
@@ -56,6 +61,11 @@ def get_device(requested):
     )
 
 
+def synchronize(device):
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
 def load_model(name, dataset, device):
     model_class, filename = MODELS[name]
     checkpoint_path = CHECKPOINT_DIR / filename
@@ -72,6 +82,7 @@ def load_model(name, dataset, device):
     )
 
     checkpoint_vocab = checkpoint.get("vocab")
+
     if (
         checkpoint_vocab is not None
         and list(checkpoint_vocab) != list(dataset.vocab)
@@ -92,8 +103,10 @@ def load_model(name, dataset, device):
     model.eval()
 
     parameter_count = sum(
-        parameter.numel() for parameter in model.parameters()
+        parameter.numel()
+        for parameter in model.parameters()
     )
+
     checkpoint_size_mb = (
         checkpoint_path.stat().st_size / (1024 ** 2)
     )
@@ -108,45 +121,62 @@ def load_model(name, dataset, device):
     )
 
 
-def synchronize(device):
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-
-
 def benchmark_batch(
-    model, inputs, batch_size, warmup, repeats, device
+    model,
+    inputs,
+    batch_size,
+    warmup,
+    repeats,
+    device,
 ):
+    # Warm-up is excluded from the timed measurements.
     with torch.inference_mode():
         for _ in range(warmup):
             model(inputs)
 
         synchronize(device)
 
-        baseline_memory = (
-            torch.cuda.memory_allocated(device)
-            if device.type == "cuda"
-            else None
-        )
+        baseline_memory = None
 
         if device.type == "cuda":
+            baseline_memory = torch.cuda.memory_allocated(device)
             torch.cuda.reset_peak_memory_stats(device)
 
         iteration_times_ms = []
 
+        # Synchronization makes each measurement include completed GPU work.
         for _ in range(repeats):
             synchronize(device)
-            start = time.perf_counter()
+            start_time = time.perf_counter()
 
             model(inputs)
 
-        synchronize(device)
-        iteration_times_ms.append(
-            (time.perf_counter() - start) * 1000
-        )
+            synchronize(device)
+            elapsed_ms = (
+                time.perf_counter() - start_time
+            ) * 1000.0
 
-    latency_batch_ms = sum(iteration_times_ms) / repeats
-    latency_ecg_ms = latency_batch_ms / batch_size
-    throughput = batch_size / (elapsed / repeats)
+            iteration_times_ms.append(elapsed_ms)
+
+    # Use measured latency values for all summary statistics.
+    timings = torch.tensor(
+        iteration_times_ms,
+        dtype=torch.float64,
+    )
+
+    mean_latency_ms = float(timings.mean().item())
+    median_latency_ms = float(timings.median().item())
+    p90_latency_ms = float(
+        torch.quantile(timings, 0.90).item()
+    )
+
+    total_elapsed_seconds = sum(iteration_times_ms) / 1000.0
+
+    latency_per_ecg_ms = mean_latency_ms / batch_size
+
+    throughput = (
+        batch_size / (mean_latency_ms / 1000.0)
+    )
 
     peak_memory_mb = None
     incremental_memory_mb = None
@@ -155,42 +185,45 @@ def benchmark_batch(
         peak_bytes = torch.cuda.max_memory_allocated(device)
 
         peak_memory_mb = peak_bytes / (1024 ** 2)
+
         incremental_memory_mb = (
-            max(0, peak_bytes - baseline_memory) / (1024 ** 2)
+            max(0, peak_bytes - baseline_memory)
+            / (1024 ** 2)
         )
 
     return {
         "status": "ok",
         "repetitions": repeats,
-        "total_elapsed_seconds": elapsed,
-        "latency_per_batch_ms": latency_batch_ms,
-        "latency_per_ecg_ms": latency_ecg_ms,
+        "total_elapsed_seconds": total_elapsed_seconds,
+        "latency_per_batch_ms": mean_latency_ms,
+        "median_latency_per_batch_ms": median_latency_ms,
+        "p90_latency_per_batch_ms": p90_latency_ms,
+        "latency_per_ecg_ms": latency_per_ecg_ms,
         "throughput_ecgs_per_second": throughput,
         "peak_gpu_memory_mb": peak_memory_mb,
         "incremental_peak_gpu_memory_mb": incremental_memory_mb,
-        "median_latency_per_batch_ms": float(
-            torch.tensor(iteration_times_ms).median().item()
-        ),
-        "p90_latency_per_batch_ms": float(
-            torch.quantile(
-                torch.tensor(iteration_times_ms), 0.90
-            ).item()
-        ),
     }
 
 
 def main():
     args = parse_args()
 
-    if args.warmup < 0 or args.repeats < 1:
+    if args.warmup < 0:
         raise ValueError(
-            "--warmup must be >= 0 and --repeats must be >= 1."
+            "--warmup must be greater than or equal to zero."
+        )
+
+    if args.repeats < 1:
+        raise ValueError(
+            "--repeats must be at least one."
         )
 
     try:
         batch_sizes = sorted(
-            {int(value.strip())
-             for value in args.batch_sizes.split(",")}
+            {
+                int(value.strip())
+                for value in args.batch_sizes.split(",")
+            }
         )
     except ValueError as error:
         raise ValueError(
@@ -198,7 +231,9 @@ def main():
         ) from error
 
     if not batch_sizes or any(size < 1 for size in batch_sizes):
-        raise ValueError("Batch sizes must be positive integers.")
+        raise ValueError(
+            "--batch-sizes must contain positive integers."
+        )
 
     device = get_device(args.device)
 
@@ -210,14 +245,21 @@ def main():
         print("Using CPU")
 
     print(f"Loading PTB-XL {args.split} split...")
+
     dataset = PTBXLDataset(split=args.split)
 
     sample_count = min(max(batch_sizes), len(dataset))
+
     signals = []
 
     for index in range(sample_count):
         item = dataset[index]
-        signal = item[0] if isinstance(item, (tuple, list)) else item
+
+        signal = (
+            item[0]
+            if isinstance(item, (tuple, list))
+            else item
+        )
 
         if not torch.is_tensor(signal):
             signal = torch.as_tensor(signal)
@@ -229,7 +271,10 @@ def main():
             )
 
         signals.append(
-            signal.detach().to(device="cpu", dtype=torch.float32)
+            signal.detach().to(
+                device="cpu",
+                dtype=torch.float32,
+            )
         )
 
     inputs_cpu = torch.stack(signals, dim=0)
@@ -240,13 +285,21 @@ def main():
     print(f"Timed passes: {args.repeats}")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
     results = []
 
     for model_name in MODELS:
         print(f"\nLoading {model_name}...")
 
-        model, parameters, checkpoint_mb, checkpoint_path = (
-            load_model(model_name, dataset, device)
+        (
+            model,
+            parameters,
+            checkpoint_mb,
+            checkpoint_path,
+        ) = load_model(
+            model_name,
+            dataset,
+            device,
         )
 
         print(f"Checkpoint: {checkpoint_path.name}")
@@ -269,7 +322,11 @@ def main():
                     **base,
                     "status": "skipped: insufficient recordings",
                 })
-                print(f"  Batch {batch_size}: skipped")
+
+                print(
+                    f"  Batch {batch_size}: skipped; "
+                    "insufficient recordings."
+                )
                 continue
 
             if oom_encountered:
@@ -287,17 +344,21 @@ def main():
                     torch.cuda.empty_cache()
 
                 measurement = benchmark_batch(
-                    model,
-                    inputs,
-                    batch_size,
-                    args.warmup,
-                    args.repeats,
-                    device,
+                    model=model,
+                    inputs=inputs,
+                    batch_size=batch_size,
+                    warmup=args.warmup,
+                    repeats=args.repeats,
+                    device=device,
                 )
 
-                results.append({**base, **measurement})
+                results.append({
+                    **base,
+                    **measurement,
+                })
 
                 memory = measurement["peak_gpu_memory_mb"]
+
                 memory_text = (
                     f", peak GPU memory={memory:.1f} MB"
                     if memory is not None
@@ -306,10 +367,13 @@ def main():
 
                 print(
                     f"  Batch {batch_size}: "
-                    f"{measurement['latency_per_batch_ms']:.3f} "
+                    f"mean={measurement['latency_per_batch_ms']:.3f} "
                     f"ms/batch, "
-                    f"{measurement['latency_per_ecg_ms']:.3f} "
-                    f"ms/ECG, "
+                    f"median={measurement['median_latency_per_batch_ms']:.3f} "
+                    f"ms, "
+                    f"P90={measurement['p90_latency_per_batch_ms']:.3f} "
+                    f"ms, "
+                    f"{measurement['latency_per_ecg_ms']:.3f} ms/ECG, "
                     f"{measurement['throughput_ecgs_per_second']:.2f} "
                     f"ECG/s{memory_text}"
                 )
@@ -350,6 +414,8 @@ def main():
         "repetitions",
         "total_elapsed_seconds",
         "latency_per_batch_ms",
+        "median_latency_per_batch_ms",
+        "p90_latency_per_batch_ms",
         "latency_per_ecg_ms",
         "throughput_ecgs_per_second",
         "parameter_count",
@@ -361,7 +427,9 @@ def main():
     csv_path = OUTPUT_DIR / "benchmark_efficiency.csv"
 
     with csv_path.open(
-        "w", newline="", encoding="utf-8"
+        "w",
+        newline="",
+        encoding="utf-8",
     ) as file:
         writer = csv.DictWriter(
             file,
@@ -383,14 +451,17 @@ def main():
         "batch_sizes": batch_sizes,
         "recordings_loaded": len(inputs_cpu),
         "timing_scope": (
-            "Model forward pass on device-resident ECG tensors. "
-            "Dataset loading, checkpoint loading, warm-up, and "
-            "host-to-device transfer are excluded."
+            "Forward-pass latency measured on device-resident ECG "
+            "tensors. Dataset loading, checkpoint loading, warm-up, "
+            "and host-to-device transfer are excluded. Each timed "
+            "iteration is synchronized, so reported latency includes "
+            "synchronization and Python dispatch overhead."
         ),
         "results": results,
     }
 
     json_path = OUTPUT_DIR / "benchmark_efficiency.json"
+
     json_path.write_text(
         json.dumps(report, indent=2),
         encoding="utf-8",

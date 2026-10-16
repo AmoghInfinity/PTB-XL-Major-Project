@@ -310,6 +310,27 @@ def main():
         if (iteration + 1) % 100 == 0:
             print(f"Completed {iteration + 1}/{N_BOOTSTRAPS} bootstraps")
 
+    RESULTS.mkdir(parents=True, exist_ok=True)
+
+    bootstrap_samples = {}
+    for metric_name in metric_names:
+        for model_name, samples in (
+            ("resnet1d", base_boot[metric_name]),
+            ("ecg_mamba", mamba_boot[metric_name]),
+            ("difference", diff_boot[metric_name]),
+        ):
+            bootstrap_samples[f"{model_name}__{metric_name}"] = np.asarray(
+                [
+                    np.nan if value is None else value
+                    for value in samples
+                ],
+                dtype=np.float64,
+            )
+
+    bootstrap_path = RESULTS / "paired_model_bootstrap_samples.npz"
+    np.savez_compressed(bootstrap_path, **bootstrap_samples)
+    print(f"Saved bootstrap samples: {bootstrap_path}")
+
     output = {
         "method": "paired_patient_cluster_bootstrap",
         "n_bootstraps": N_BOOTSTRAPS,

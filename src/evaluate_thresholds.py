@@ -25,8 +25,14 @@ def load_predictions(path):
     )
 
 
+
 def find_best_thresholds(y_true, y_prob, threshold_grid):
-    thresholds = np.zeros(y_true.shape[1], dtype=np.float32)
+    # Initialize thresholds with a safe fallback.
+    thresholds = np.full(
+        y_true.shape[1],
+        0.5,
+        dtype=np.float32,
+    )
     best_f1 = np.zeros(y_true.shape[1], dtype=np.float32)
 
     for label_idx in range(y_true.shape[1]):
@@ -46,6 +52,7 @@ def find_best_thresholds(y_true, y_prob, threshold_grid):
                 thresholds[label_idx] = threshold
 
     return thresholds, best_f1
+
 
 
 def evaluate_predictions(y_true, y_prob, thresholds, vocab, tier_of):

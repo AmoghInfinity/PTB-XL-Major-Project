@@ -37,7 +37,7 @@ TEST_INPUT = (
 OUTPUT_PATH = (
     PROJECT_ROOT
     / "results"
-    / "weighted_bce_threshold_evaluation.json"
+    / "weighted_bce_threshold_evaluation_tiers_corrected.json"
 )
 
 
@@ -110,27 +110,16 @@ def find_best_thresholds(
     return thresholds, best_f1
 
 
-def get_tiers(vocab, validation_targets):
-    counts = validation_targets.sum(axis=0)
+def get_tiers(vocab, dataset):
+    dataset_vocab = np.asarray(dataset.vocab, dtype=str)
+    prediction_vocab = np.asarray(vocab, dtype=str)
 
-    order = np.argsort(-counts)
+    if not np.array_equal(prediction_vocab, dataset_vocab):
+        raise ValueError(
+            "Prediction vocabulary does not match the dataset vocabulary."
+        )
 
-    n_labels = len(vocab)
-    third = n_labels // 3
-
-    tier_of = {}
-
-    for rank, label_idx in enumerate(order):
-        if rank < third:
-            tier = "common"
-        elif rank < 2 * third:
-            tier = "medium"
-        else:
-            tier = "rare"
-
-        tier_of[vocab[label_idx]] = tier
-
-    return tier_of
+    return dataset.tier_of
 
 
 def evaluate_thresholds(
@@ -315,7 +304,7 @@ def main():
 
     tier_of = get_tiers(
         vocab,
-        y_val_true,
+        validation_ds,
     )
 
     print("\nSelected thresholds:")

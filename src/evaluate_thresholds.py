@@ -4,6 +4,11 @@ import json
 from pathlib import Path
 
 import numpy as np
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from data.dataset import PTBXLDataset
 from sklearn.metrics import (
     f1_score,
     roc_auc_score,
@@ -133,7 +138,7 @@ def main():
     parser.add_argument(
         "--output",
         type=str,
-        default="results/threshold_evaluation.json",
+        default="results/threshold_evaluation_tiers_corrected.json",
     )
 
     parser.add_argument(
@@ -180,23 +185,17 @@ def main():
         threshold_grid,
     )
 
-    tier_of = {}
+    tier_ds = PTBXLDataset(split="val")
 
-    counts = val_y_true.sum(axis=0)
+    if not np.array_equal(
+        np.asarray(vocab, dtype=str),
+        np.asarray(tier_ds.vocab, dtype=str),
+    ):
+        raise ValueError(
+            "Prediction vocabulary does not match the dataset vocabulary."
+        )
 
-    order = np.argsort(-counts)
-    n_labels = len(vocab)
-    third = n_labels // 3
-
-    for rank, label_idx in enumerate(order):
-        if rank < third:
-            tier = "common"
-        elif rank < 2 * third:
-            tier = "medium"
-        else:
-            tier = "rare"
-
-        tier_of[vocab[label_idx]] = tier
+    tier_of = tier_ds.tier_of
 
     print("\nValidation-selected thresholds:")
     for label, threshold, score in zip(

@@ -5,6 +5,9 @@ Supports standard BCE, class-weighted BCE, and focal loss experiments.
 
 # importing libraries
 import argparse
+import csv
+import os
+import random
 import sys
 import time
 from pathlib import Path
@@ -52,6 +55,25 @@ class FocalLoss(nn.Module):
         focal_weight = (1.0 - p_t).pow(self.gamma)
 
         return (focal_weight * bce_loss).mean()
+
+def set_seed(seed: int, deterministic: bool = False) -> None:
+    """Seed every RNG that affects training (added for multi-seed experiments)."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    if deterministic:
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        torch.use_deterministic_algorithms(True, warn_only=True)
+
+
+def seed_worker(worker_id: int) -> None:
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
 
 def get_device() -> torch.device:
     if torch.cuda.is_available():
@@ -234,14 +256,25 @@ def main():
         help="Checkpoint filename.",
     )
 
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Random seed. If omitted, behaviour matches the original (unseeded) script.")
+    parser.add_argument("--deterministic", action="store_true",
+                        help="Request deterministic cuDNN/cuBLAS kernels (slower).")
+    parser.add_argument("--val-fold", type=int, default=9)
+    parser.add_argument("--test-fold", type=int, default=10)
+
     args = parser.parse_args()
+
+    if args.seed is not None:
+        set_seed(args.seed, args.deterministic)
+        print(f"Seed: {args.seed}  deterministic={args.deterministic}")
 
     device = get_device()
     CHECKPOINT_DIR.mkdir(exist_ok=True)
 
     print("Loading datasets...")
-    train_ds = PTBXLDataset(split="train")
-    val_ds = PTBXLDataset(split="val")
+    train_ds = PTBXLDataset(split="train", val_fold=args.val_fold, test_fold=args.test_fold)
+    val_ds = PTBXLDataset(split="val", val_fold=args.val_fold, test_fold=args.test_fold)
 
     print(
         f"Train: {len(train_ds)}  "
@@ -256,6 +289,8 @@ def main():
         num_workers=args.num_workers,
         pin_memory=True,
         drop_last=True,
+        worker_init_fn=seed_worker,
+        generator=(torch.Generator().manual_seed(args.seed) if args.seed is not None else None),
     )
 
     val_loader = DataLoader(
@@ -336,6 +371,12 @@ def main():
     checkpoint_path = (
         CHECKPOINT_DIR / args.checkpoint_name
     )
+    log_path = checkpoint_path.with_suffix(".log.csv")
+    log_file = open(log_path, "w", newline="", encoding="utf-8")
+    log_writer = csv.writer(log_file)
+    log_writer.writerow(["epoch", "train_loss", "val_macro_auroc", "val_common_auroc",
+                         "val_medium_auroc", "val_rare_auroc", "seconds", "saved"])
+    best_epoch = None
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -412,15 +453,24 @@ def main():
             f"({elapsed:.1f}s)"
         )
 
-        if (
-            val_metrics["macro_auroc"]
-            > best_val_auroc
-        ):
+        improved = val_metrics["macro_auroc"] > best_val_auroc
+        log_writer.writerow([epoch, train_loss, val_metrics["macro_auroc"], val_metrics["common_auroc"],
+                             val_metrics["medium_auroc"], val_metrics["rare_auroc"], round(elapsed, 2), int(improved)])
+        log_file.flush()
+
+        if improved:
             best_val_auroc = (
                 val_metrics["macro_auroc"]
             )
 
+            best_epoch = epoch
             checkpoint = {
+                "epoch": epoch,
+                "seed": args.seed,
+                "val_fold": args.val_fold,
+                "test_fold": args.test_fold,
+                "args": vars(args),
+                "best_val_macro_auroc": best_val_auroc,
                 "model_name": args.model,
                 "model_state": model.state_dict(),
                 "vocab": train_ds.vocab,
@@ -443,6 +493,9 @@ def main():
                 f"(val_macro_auroc="
                 f"{best_val_auroc:.4f})"
             )
+
+    log_file.close()
+    print(f"Best epoch: {best_epoch}   Epoch log: {log_path}")
 
     print(
         "\nTraining complete. "

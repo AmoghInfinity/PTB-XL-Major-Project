@@ -43,4 +43,3 @@ foreach ($s in $Seeds) {
 # }
 
 Invoke-Py src/aggregate_seeds.py --seeds-dir results/seeds --tiers-json tiers.json --out results/seeds/aggregate.json
-Write-Host "Done. Send results/seeds/aggregate.json, results/seeds/torch_version.txt and the checkpoints/*.log.csv files."

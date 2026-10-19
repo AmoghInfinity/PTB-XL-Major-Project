@@ -1,6 +1,7 @@
 # Calibrated, Selective ECG Diagnosis — PTB-XL (Local / VSCode)
 
-Local project setup for an RTX 5050 (8GB, Blackwell / `sm_120`) GPU.
+Multi-label 12-lead ECG classification on PTB-XL (44 diagnostic statements) with a frequency-stratified
+analysis of calibration and selective prediction. Developed locally on an RTX 5050 (8 GB, Blackwell / `sm_120`) GPU.
 
 ## 0. Why this needs a specific install command
 
@@ -26,24 +27,24 @@ python -m venv .venv
 # macOS/Linux:
 source .venv/bin/activate
 
-# Install PyTorch for Blackwell (cu128 minimum — check
-# https://pytorch.org/get-started/locally/ for the current recommended
-# index; cu128 or cu129 both work as of late 2026):
+# PyTorch for Blackwell (cu128 minimum):
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 
 # Everything else:
 pip install -r requirements.txt
 ```
 
-**Verify the GPU is actually recognized correctly before doing anything else:**
+Verified environment for the reported experiments: **Python 3.11.8, PyTorch 2.11.0+cu128 (CUDA 12.8)**, Windows,
+NVIDIA GeForce RTX 5050 Laptop GPU.
+
+**Verify the GPU before doing anything else:**
 
 ```bash
 python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0)); print(torch.cuda.get_device_capability(0))"
 ```
 
 You should see `(12, 0)` as the compute capability. If `torch.cuda.is_available()`
-is `False`, your driver or CUDA toolkit is the problem, not PyTorch — update
-your NVIDIA driver first (Blackwell needs a recent one).
+is `False`, update your NVIDIA driver first (Blackwell needs a recent one).
 
 ## 2. Download PTB-XL
 
@@ -51,51 +52,44 @@ your NVIDIA driver first (Blackwell needs a recent one).
 python src/data/download_ptbxl.py
 ```
 
-Downloads the 100Hz release (~1.7GB) directly from PhysioNet into `data/ptbxl/`.
-No login or credentialing required.
+Downloads PTB-XL v1.0.3 (~1.7 GB) from PhysioNet into `data/ptbxl/`. No login required. Only the 100 Hz records are used.
 
-## 3. Train
-
-```bash
-python src/train.py --epochs 30 --batch-size 128 --amp
-```
-
-- `--batch-size 128` is a safe starting point for 8GB VRAM on a 1D CNN this
-  size; bump it up if `nvidia-smi` shows headroom, or lower it if you hit an
-  out-of-memory error.
-- `--amp` enables automatic mixed precision (bf16 on Blackwell), which both
-  speeds up training and reduces VRAM pressure — worth leaving on by default
-  on this card.
-
-## 4. Project layout
+## 3. Project layout
 
 ```
 ptbxl_project/
-├── data/ptbxl/              # downloaded dataset (gitignored)
-├── checkpoints/             # saved model weights
-├── configs/default.yaml     # hyperparameters
+├── data/ptbxl/                      # PTB-XL v1.0.3 (gitignored)
+├── checkpoints/                     # model weights + per-epoch logs (*.log.csv)
+├── configs/default.yaml             # reference hyperparameters (train.py uses CLI arguments)
+├── results/                         # predictions (.npz) and analysis outputs (.json, figures)
+│   ├── seeds/s1..s5/                # five-seed replication
+│   └── folds/f1..f10/               # 10-fold rotation
 ├── src/
 │   ├── data/
 │   │   ├── download_ptbxl.py
-│   │   ├── labels.py        # SCP-ECG parsing, frequency-tier assignment
-│   │   └── dataset.py        # PyTorch Dataset / DataLoader
+│   │   ├── labels.py                # SCP-ECG parsing, frequency tiers
+│   │   └── dataset.py               # Dataset; optional --val-fold/--test-fold
 │   ├── models/
-│   │   └── resnet1d.py      # 1D ResNet multi-label classifier
-│   └── train.py              # training loop, AMP, checkpointing
+│   │   ├── resnet1d.py              # 1-D ResNet (980,460 parameters)
+│   │   └── ecg_mamba.py             # Mamba-style selective SSM (165,804 parameters)
+│   ├── train.py                     # training (BCE / weighted BCE / focal), seeds, epoch logs
+│   ├── predict_split.py             # save val + test predictions of a checkpoint
+│   ├── aggregate_seeds.py           # five-seed summary (mean ± SD, paired differences)
+│   ├── aggregate_folds.py           # pooled 10-fold rotation analysis + patient bootstrap
+│   ├── recalibration_study.py       # global / tier / label temperature, label Platt scaling
+│   ├── recalibration_bootstrap.py   # patient-level CIs for the recalibration comparison
+│   ├── retention_bootstrap.py       # patient-level CIs for selective-prediction retention
+│   ├── platt_sensitivity.py         # Platt scaling hyper-parameter sensitivity
+│   ├── paper_analysis.py            # per-label tables, selective curves
+│   ├── make_figures.py              # paper figures (single test fold)
+│   └── ... original evaluation scripts (see Section 6)
+├── tiers.json                       # 44-label vocabulary and frequency tiers
+├── run_seeds.ps1                    # five-seed replication driver
+├── run_folds.ps1                    # 10-fold rotation driver
 └── requirements.txt
 ```
 
-## 5. Evaluation and Research Workflow
-
-The project supports multi-label ECG classification on PTB-XL, with evaluation focused on predictive performance, frequency-tier performance, probability calibration, and uncertainty-based selective prediction.
-
-### Models
-
-- **ResNet1D:** Baseline 1D residual neural network for multi-label ECG classification.
-- **ECG-Mamba:** Alternative sequence-model architecture evaluated against ResNet1D.
-- **Weighted BCE:** Imbalance-aware training experiment for improving performance on less frequent diagnostic labels.
-
-### Training
+## 4. Train
 
 Baseline ResNet1D:
 
@@ -103,118 +97,138 @@ Baseline ResNet1D:
 python src/train.py --epochs 30 --batch-size 128 --amp
 ```
 
-Weighted BCE experiment:
+ECG-Mamba:
+
+```bash
+python src/train.py --model ecg_mamba --epochs 30 --batch-size 128 --amp --checkpoint-name ecg_mamba_best.pt
+```
+
+Weighted BCE:
 
 ```bash
 python src/train.py --epochs 30 --batch-size 256 --amp --loss weighted_bce --checkpoint-name best_model_weighted_bce.pt
 ```
 
-Use the checkpoint and configuration corresponding to each experiment when reproducing its results.
+Additional arguments:
 
-### Evaluation scripts
+| Argument | Meaning |
+|---|---|
+| `--seed N` | Seeds Python, NumPy, PyTorch and data-loader workers. Without it, behaviour matches the original unseeded runs. |
+| `--deterministic` | Requests deterministic cuDNN/cuBLAS kernels (slower). |
+| `--val-fold K --test-fold M` | Use other PTB-XL folds for validation/test (default 9 / 10). |
+
+Every run writes `checkpoints/<name>.log.csv` (per-epoch loss and validation AUROC per tier) and stores the
+epoch, seed, folds and all arguments inside the checkpoint.
+
+## 5. Experiments
+
+### 5.1 Official split (folds 1–8 / 9 / 10)
+
+The archived checkpoints (`best_model.pt`, `ecg_mamba_best.pt`, `best_model_weighted_bce.pt`, `best_model_focal.pt`)
+are evaluated on fold 10 with the scripts in Section 6.
+
+### 5.2 Five-seed replication
+
+```powershell
+powershell -ExecutionPolicy Bypass -File run_seeds.ps1
+```
+
+Trains ResNet1D and ECG-Mamba with seeds 1–5, saves predictions to `results/seeds/s<k>/`, and writes
+`results/seeds/aggregate.json`.
+
+### 5.3 10-fold rotation
+
+```powershell
+powershell -ExecutionPolicy Bypass -File run_folds.ps1
+```
+
+Each PTB-XL fold is the test fold once (validation = next fold). Calibrators are fitted on each rotation's own
+validation fold. The 10 test folds are pooled (all 21,799 records, 709 rare-tier positives instead of 70) and
+analysed with a patient-cluster bootstrap. Output: `results/folds/fold_rotation.json`.
+
+### 5.4 Post-hoc analyses (CPU only, from saved predictions)
+
+```bash
+python src/recalibration_study.py --results results --tiers-json tiers.json --out results/paper_analysis
+python src/recalibration_bootstrap.py --recal-dir results/paper_analysis --tiers-json tiers.json --metadata data/ptbxl/ptbxl_database.csv
+python src/retention_bootstrap.py results tiers.json data/ptbxl/ptbxl_database.csv results/paper_analysis/retention_bootstrap.json
+python src/platt_sensitivity.py --results results --tiers-json tiers.json --out results/paper_analysis
+```
+
+## 6. Original evaluation scripts
 
 | Script | Purpose |
 |---|---|
-| `src/evaluate.py` | Evaluate the baseline model |
+| `src/evaluate.py` | Evaluate a checkpoint on the test fold (AUROC, F1 per tier) |
 | `src/evaluate_weighted_bce.py` | Evaluate the weighted-BCE model |
-| `src/evaluate_thresholds.py` | Select per-label thresholds on validation predictions and evaluate on test predictions |
-| `src/evaluate_weighted_bce_thresholds.py` | Perform validation-selected threshold evaluation for weighted BCE |
-| `src/calibration.py` | Evaluate probability calibration |
-| `src/temperature_scaling.py` | Apply temperature scaling and assess calibration |
-| `src/compare_models.py` | Compare models using paired statistical analysis |
-| `src/statistical_analysis.py` | Statistical analysis of the ResNet1D model |
-| `src/statistical_analysis_ecg_mamba.py` | Statistical analysis of ECG-Mamba |
-| `src/selective_prediction.py` | Evaluate uncertainty-based selective prediction and risk-coverage behavior |
-| `src/selective_prediction_bootstrap.py` | Estimate paired patient-cluster bootstrap uncertainty for selective-prediction comparisons |
-| `src/check_pipeline.py` | Check dataset and preprocessing assumptions |
+| `src/evaluate_thresholds.py` | Select per-label thresholds on validation, evaluate on test |
+| `src/evaluate_weighted_bce_thresholds.py` | Same for weighted BCE |
+| `src/calibration.py` | Raw calibration (ECE, Brier, reliability diagrams) |
+| `src/temperature_scaling.py`, `src/temperature_scaling_ecg_mamba.py` | Global temperature scaling |
+| `src/compare_models.py` | Paired patient-cluster bootstrap, ResNet1D vs ECG-Mamba |
+| `src/statistical_analysis.py`, `src/statistical_analysis_ecg_mamba.py` | Raw vs temperature-scaled bootstrap |
+| `src/selective_prediction.py`, `src/selective_prediction_bootstrap.py` | Risk–coverage and AURC with CIs |
+| `src/explainability.py`, `src/run_explainability_batch.py` | Integrated Gradients (qualitative) |
+| `src/benchmark_efficiency.py` | Inference latency / throughput |
+| `src/check_pipeline.py` | Data and preprocessing audit |
 
-Run each script with the arguments and input paths supported by its implementation.
+## 7. Evaluation methodology
 
-## 6. Evaluation Methodology
+- **Splits:** official stratified folds; 17,418 / 2,183 / 2,198 recordings (training / validation / test); 1,904 test patients. Folds are patient-disjoint.
+- **Labels:** 44 diagnostic SCP statements with ≥ 10 occurrences. The label list and tiers (14 common, 15 medium, 15 rare) are identical whether computed on all folds or on the training folds only.
+- **Fitting rules:** checkpoint selection, decision thresholds, temperatures and Platt parameters use the validation fold only; the test fold is never used for fitting.
+- **Calibration metrics:** ECE (15 equal-width bins), ECE divided by prevalence, expected/observed positives (E/O), NLL, Brier score, all per label and averaged per tier.
+- **Selective prediction:** recordings ranked by mean binary entropy; Hamming risk, AURC, and per-tier retention of positive findings.
+- **Uncertainty:** paired patient-cluster bootstrap (1,000 replicates, seed 42); across-seed paired t-tests for training variability.
+- Fixed-threshold (0.5) and validation-tuned-threshold results are reported separately.
 
-### Dataset splits
+## 8. Verified results (official test fold, archived checkpoints)
 
-The current project uses the PTB-XL metadata folds as follows:
+| Metric | ResNet1D (BCE) | Weighted BCE | ECG-Mamba |
+|---|---:|---:|---:|
+| Macro AUROC | 0.9235 | 0.9089 | 0.9173 |
+| Macro F1, threshold 0.5 | 0.2150 | 0.2285 | 0.2459 |
+| Macro F1, tuned thresholds | 0.2853 | 0.2856 | 0.3172 |
+| Micro F1, tuned thresholds | **0.5753** | 0.5424 | 0.5853 |
+| Rare-tier F1, tuned thresholds | 0.0758 | 0.0971 | 0.1351 |
 
-- Training: folds 1–8
-- Validation: fold 9
-- Test: fold 10
+**Correction:** an earlier version of this README reported a ResNet1D tuned micro-F1 of 0.4425. That value came from
+`threshold_evaluation(_tiers_corrected).json`, produced before the threshold-fallback fix. In that run label 2AVB
+(one validation positive) received threshold 0.00 and was predicted positive for every test record. The correct
+value, 0.5753, is in `results/resnet1d_threshold_evaluation_corrected.json`.
 
-The current local metadata contains 21,799 recordings. The corresponding split sizes are 17,418 training, 2,183 validation, and 2,198 test recordings.
+### Five-seed replication (mean ± SD, seeds 1–5)
 
-### Multi-label evaluation
+| Metric | ResNet1D | ECG-Mamba | ECG-Mamba better |
+|---|---:|---:|---:|
+| Macro AUROC | 0.9166 ± 0.0028 | 0.9027 ± 0.0065 | 0/5 (p = 0.006) |
+| Macro AUPRC | 0.3136 ± 0.0085 | 0.2846 ± 0.0128 | 0/5 |
+| Macro NLL after label Platt | 0.0592 ± 0.0006 | 0.0610 ± 0.0010 | 0/5 |
 
-The classifier predicts 44 diagnostic labels. Evaluation includes AUROC, AUPRC, F1-score, and calibration metrics. Fixed-threshold results and validation-selected-threshold results are separate evaluation settings and should not be mixed in tables or conclusions.
+The archived single-run advantage of ECG-Mamba on proper scoring rules did **not** replicate across seeds.
 
-### Frequency-tier evaluation
+## 9. Main findings (hold in all 10 seeded runs)
 
-Labels are grouped into common, medium, and rare tiers using the shared frequency-tier mapping implemented in `src/data/labels.py` and exposed through `PTBXLDataset.tier_mask()`.
+1. **Global temperature scaling over-predicts rare diagnoses.** It improves common-label calibration but raises the
+   rare-tier expected/observed ratio from about 0.84–0.89 to about 1.6.
+2. **Per-label Platt scaling** (shrinkage, tier-level fallback for labels with < 5 validation positives) gives the
+   lowest NLL and common-tier ECE and keeps rare-tier E/O near 1.
+3. **Entropy-based abstention defers rare findings.** At 50 % coverage only about 13–20 % of rare-tier positives
+   remain in the accepted set, so accepted-set accuracy overstates reliability on rare findings.
 
-For the current 44-label vocabulary, the authoritative tier sizes are:
+## 10. Reproducibility and artifact management
 
-| Tier | Number of labels |
-|---|---:|
-| Common | 14 |
-| Medium | 15 |
-| Rare | 15 |
-| **Total** | **44** |
+- Keep checkpoints and raw prediction arrays separate from derived summaries.
+- Select thresholds and calibrators on validation data only.
+- Reuse the shared label vocabulary and tier mapping (`tiers.json` / `PTBXLDataset.tier_mask()`).
+- Preserve original result files when correcting evaluation logic; save corrections under new names.
+- Record checkpoint, seed, folds, threshold policy and software environment for every reported experiment
+  (`train.py` now stores these automatically).
 
-Evaluation scripts should reuse the dataset's shared mapping rather than independently reconstructing tiers from validation frequencies. The threshold-evaluation scripts have been updated to follow this rule.
+## 11. Project status
 
-### Threshold selection
+Completed: multi-label classification (ResNet1D, ECG-Mamba, weighted BCE, focal loss), frequency-tier evaluation,
+calibration and recalibration study, selective prediction, patient-level bootstrap, five-seed replication,
+Integrated Gradients, efficiency benchmark, and a manuscript draft (IEEE single-column).
 
-Per-label thresholds are selected using validation data only. The selected thresholds are then applied to the test predictions.
-
-Threshold-optimized F1 results should be reported separately from F1 results obtained using a fixed threshold of 0.5. Thresholds and their validation scores should be retained for reproducibility.
-
-### Calibration and selective prediction
-
-Calibration is assessed using metrics including Expected Calibration Error (ECE) and Brier score. Temperature scaling is evaluated separately from raw model probabilities.
-
-Selective prediction ranks recordings by predictive uncertainty and evaluates classification risk at different coverage levels. The project also uses paired patient-cluster bootstrap analysis to quantify uncertainty in model differences.
-
-## 7. Verified Threshold-Selected Results
-
-The following results use validation-selected per-label thresholds and the corrected shared frequency-tier mapping.
-
-| Metric | ResNet1D baseline | Weighted BCE |
-|---|---:|---:|
-| Macro F1 | 0.2853 | 0.2856 |
-| Micro F1 | 0.4425 | 0.5424 |
-| Common-tier F1 | 0.5632 | 0.5364 |
-| Medium-tier F1 | 0.2353 | 0.2400 |
-| Rare-tier F1 | 0.0759 | 0.0971 |
-| Macro AUROC | 0.9235 | Not stored in this threshold-evaluation result |
-
-These figures describe threshold-selected performance. They should not be interpreted as fixed-threshold results or as proof that one model is universally superior.
-
-The weighted-BCE threshold-evaluation output does not currently store macro AUROC. Use the corresponding fixed-threshold evaluation artifact for that metric, and clearly identify the evaluation setting when reporting it.
-
-### Corrected result artifacts
-
-The following files contain the corrected tier summaries:
-
-- `results/threshold_evaluation_tiers_corrected.json`
-- `results/weighted_bce_threshold_evaluation_tiers_corrected.json`
-
-The original files remain available for historical comparison:
-
-- `results/threshold_evaluation.json`
-- `results/weighted_bce_threshold_evaluation.json`
-
-The overall macro and micro F1 values are unchanged by the tier correction. The tier-specific values differ because the label grouping has been made consistent.
-
-## 8. Reproducibility and Artifact Management
-
-- Keep trained checkpoints and raw prediction arrays separate from derived evaluation summaries.
-- Select thresholds on validation data only; do not use test performance to tune them.
-- Reuse the same label vocabulary and frequency-tier mapping across model evaluations.
-- Preserve original result files when correcting evaluation logic. Save corrected outputs under distinct filenames until they have been verified.
-- Record the model checkpoint, threshold-selection procedure, split, evaluation metrics, and software environment for every reported experiment.
-- Do not compare results from different threshold policies as if they were produced under identical settings.
-
-## 9. Project Status
-
-The project has progressed beyond the initial training skeleton. Its current workflow includes multi-label ECG classification, ResNet1D and ECG-Mamba comparisons, weighted-BCE experiments, calibration, temperature scaling, statistical analysis, and uncertainty-based selective prediction.
-
-Remaining research work includes consolidating the final experimental tables, ensuring all reported metrics use consistent evaluation definitions, reviewing related literature, and documenting the limitations of the current dataset and evaluation setup.
+In progress: 10-fold rotation (ResNet1D) to increase rare-tier test positives tenfold.
